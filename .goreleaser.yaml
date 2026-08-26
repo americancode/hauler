@@ -1,13 +1,6 @@
 version: 2
 
 project_name: hauler
-before:
-  hooks:
-    - go mod tidy
-    - go mod download
-    - go fmt ./...
-    - go vet ./...
-
 release:
   prerelease: auto
   make_latest: false
@@ -38,7 +31,7 @@ dockers_v2:
     flags:
       - "--target=release"
     images:
-      - ghcr.io/hauler-dev/hauler
+      - ghcr.io/{{ .Env.GHCR_OWNER }}/hauler
     tags:
       - "{{ .Version }}"
     platforms:
@@ -58,7 +51,7 @@ dockers_v2:
     flags:
       - "--target=debug"
     images:
-      - ghcr.io/hauler-dev/hauler-debug
+      - ghcr.io/{{ .Env.GHCR_OWNER }}/hauler-debug
     tags:
       - "{{ .Version }}"
     platforms:
