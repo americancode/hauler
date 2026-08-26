@@ -1,0 +1,263 @@
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_checks:
+        description: Run tests and vulnerability scans
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_checks }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Format code
+        run: go fmt ./...
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./... -cover -race -covermode=atomic -coverprofile=coverage.out
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-report
+          path: coverage.out
+
+  vulnerability-scan:
+    name: Vulnerability Scan
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_checks }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Run govulncheck
+        continue-on-error: true
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+  goreleaser-release:
+    name: GoReleaser Release
+    needs: [test, vulnerability-scan]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.9.0
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: Release with GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --timeout 60m
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_OWNER: ${{ github.repository_owner }}
+
+      - name: Sign Published Images
+        env:
+          GHCR_OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION="${VERSION#v}"
+          cosign sign --yes --recursive "ghcr.io/${GHCR_OWNER}/hauler:${VERSION}"
+          cosign sign --yes --recursive "ghcr.io/${GHCR_OWNER}/hauler-debug:${VERSION}"
+
+  prune-registry:
+    name: Prune Container Images and Signatures
+    runs-on: ubuntu-latest
+    needs: goreleaser-release
+    permissions:
+      packages: write
+    steps:
+      - name: Install ORAS
+        uses: oras-project/setup-oras@v1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prune old GHCR versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          KEEP_SEMVER_COUNT: "5"
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          owner = os.environ["OWNER"]
+          keep_count = int(os.environ["KEEP_SEMVER_COUNT"])
+          registry = "ghcr.io"
+          semver = re.compile(r"^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+          artifact = re.compile(r"^sha256-([0-9a-f]{64})\..+$")
+
+          def api(path, method="GET"):
+              command = ["gh", "api", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28"]
+              if method != "GET":
+                  command += ["-X", method]
+              command.append(path)
+              return subprocess.run(command, text=True, capture_output=True)
+
+          owner_probe = api(f"/orgs/{owner}")
+          if owner_probe.returncode == 0:
+              package_base = f"/orgs/{owner}/packages/container"
+          else:
+              user_probe = api(f"/users/{owner}")
+              if user_probe.returncode != 0:
+                  raise SystemExit(f"unable to identify package owner {owner}")
+              package_base = f"/users/{owner}/packages/container"
+
+          def versions(package):
+              base = f"{package_base}/{package}/versions"
+              result = []
+              page = 1
+              while True:
+                  batch = json.loads(api(f"{base}?per_page=100&page={page}").stdout)
+                  if not batch:
+                      return base, result
+                  result.extend(batch)
+                  page += 1
+
+          def tags(version):
+              return set(version.get("metadata", {}).get("container", {}).get("tags", []) or [])
+
+          def digest(version):
+              name = version.get("name", "")
+              return name.removeprefix("sha256:")
+
+          def semver_key(tag):
+              value = tag.removeprefix("v")
+              value, _, build = value.partition("+")
+              core, _, prerelease = value.partition("-")
+              major, minor, patch = (int(part) for part in core.split(".", 2))
+              return major, minor, patch, not bool(prerelease), prerelease, build
+
+          def add_referenced_digests(ref, keep_digests):
+              result = subprocess.run(["oras", "manifest", "fetch", ref], text=True, capture_output=True)
+              if result.returncode != 0:
+                  raise SystemExit(result.stderr or result.stdout)
+              manifest = json.loads(result.stdout)
+              for descriptor in manifest.get("manifests", []) or []:
+                  value = descriptor.get("digest", "")
+                  if value.startswith("sha256:"):
+                      keep_digests.add(value.split(":", 1)[1])
+
+          for package in ("hauler", "hauler-debug"):
+              base, items = versions(package)
+              release_tags = sorted(
+                  {tag for item in items for tag in tags(item) if semver.fullmatch(tag)},
+                  key=semver_key,
+                  reverse=True,
+              )
+              keep_tags = set(release_tags[:keep_count])
+              keep_digests = set()
+              keep_ids = set()
+              subjects = {}
+
+              for item in items:
+                  item_tags = tags(item)
+                  item_digest = digest(item)
+                  if item_tags & keep_tags:
+                      keep_ids.add(item["id"])
+                      if item_digest:
+                          keep_digests.add(item_digest)
+                  for tag in item_tags:
+                      match = artifact.fullmatch(tag)
+                      if match:
+                          subjects.setdefault(item["id"], set()).add(match.group(1))
+
+              for tag in keep_tags:
+                  add_referenced_digests(f"{registry}/{owner}/{package}:{tag}", keep_digests)
+
+              for item in items:
+                  if subjects.get(item["id"], set()) & keep_digests:
+                      keep_ids.add(item["id"])
+
+              for item in items:
+                  if item["id"] in keep_ids:
+                      continue
+                  response = api(f"{base}/{item['id']}", method="DELETE")
+                  if response.returncode != 0:
+                      raise SystemExit(response.stderr or response.stdout)
+
+              print(f"{package}: kept {', '.join(sorted(keep_tags, key=semver_key, reverse=True)) or '<none>'}")
+          PY
