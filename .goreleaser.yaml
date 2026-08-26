@@ -19,8 +19,6 @@ builds:
   - dir: ./cmd/hauler/.
     goos:
       - linux
-      - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -30,26 +28,9 @@ builds:
       - CGO_ENABLED=0
       - GOEXPERIMENT=boringcrypto
 
-universal_binaries:
-  - replace: false
-
 changelog:
   disable: false
   use: git
-
-homebrew_casks:
-  - name: hauler
-    repository:
-      owner: hauler-dev
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    description: "Hauler: Airgap Swiss Army Knife"
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/hauler"]
-          end
 
 dockers_v2:
   - id: hauler
