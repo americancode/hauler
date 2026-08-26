@@ -1,14 +1,6 @@
 version: 2
 
 project_name: hauler
-before:
-  hooks:
-    - go mod tidy
-    - go mod download
-    - go fmt ./...
-    - go vet ./...
-    - go test ./... -cover -race -covermode=atomic -coverprofile=coverage.out
-
 release:
   prerelease: auto
   make_latest: false
@@ -20,8 +12,6 @@ builds:
   - dir: ./cmd/hauler/.
     goos:
       - linux
-      - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -31,26 +21,9 @@ builds:
       - CGO_ENABLED=0
       - GOEXPERIMENT=boringcrypto
 
-universal_binaries:
-  - replace: false
-
 changelog:
   disable: false
   use: git
-
-homebrew_casks:
-  - name: hauler
-    repository:
-      owner: hauler-dev
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    description: "Hauler: Airgap Swiss Army Knife"
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/hauler"]
-          end
 
 dockers_v2:
   - id: hauler
@@ -58,8 +31,7 @@ dockers_v2:
     flags:
       - "--target=release"
     images:
-      - docker.io/hauler/hauler
-      - ghcr.io/hauler-dev/hauler
+      - ghcr.io/{{ .Env.GHCR_OWNER }}/hauler
     tags:
       - "{{ .Version }}"
     platforms:
@@ -79,8 +51,7 @@ dockers_v2:
     flags:
       - "--target=debug"
     images:
-      - docker.io/hauler/hauler-debug
-      - ghcr.io/hauler-dev/hauler-debug
+      - ghcr.io/{{ .Env.GHCR_OWNER }}/hauler-debug
     tags:
       - "{{ .Version }}"
     platforms:
