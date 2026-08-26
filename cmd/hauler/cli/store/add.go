@@ -786,8 +786,12 @@ type chartJob struct {
 	cfg     v1.Chart
 	opts    flags.AddChartOpts // held by value; ChartOpts is allocated per job
 	rewrite string
-	parent  string // "" for a top-level chart, else the parent chart's ref
-	depth   int
+	// chartPrefix is the document-level chart prefix annotation. It is retained
+	// separately so dependent charts can receive the same prefix while still
+	// getting a target based on their own name.
+	chartPrefix string
+	parent      string // "" for a top-level chart, else the parent chart's ref
+	depth       int
 }
 
 // resolveChartJobs produces one top-level chartJob per entry in charts,
@@ -839,6 +843,12 @@ func resolveChartJobs(o *flags.SyncOpts, annotations map[string]string, manifest
 			return nil, err
 		}
 
+		rewrite := ch.Rewrite
+		chartPrefix := strings.Trim(annotations[consts.ChartAnnotationPrefix], "/")
+		if rewrite == "" && chartPrefix != "" {
+			rewrite = prefixChartRewrite(chartPrefix, ch.Name)
+		}
+
 		// caFile precedence: cli > per-chart > annotation.
 		caFile := o.CaFile
 		if caFile == "" {
@@ -876,11 +886,25 @@ func resolveChartJobs(o *flags.SyncOpts, annotations map[string]string, manifest
 				Platform:        platform,
 				ValuesFiles:     valuesFiles,
 			},
-			rewrite: ch.Rewrite,
+			rewrite:     rewrite,
+			chartPrefix: chartPrefix,
 		})
 	}
 
 	return jobs, nil
+}
+
+// prefixChartRewrite turns the document-level rewrite annotation into a
+// unique target for a chart. A document can contain several charts, so the
+// annotation is a prefix rather than one shared replacement reference.
+func prefixChartRewrite(prefix, chartName string) string {
+	return prefixArtifactRewrite(prefix, chartName)
+}
+
+// prefixArtifactRewrite applies a document-level rewrite prefix to an
+// artifact reference while preserving the artifact's tag or digest.
+func prefixArtifactRewrite(prefix, ref string) string {
+	return strings.Trim(prefix, "/") + "/" + strings.Trim(ref, "/")
 }
 
 // dedupeImageJobs collapses repeat pulls out of a chart tree's discovered
@@ -1406,6 +1430,10 @@ func fetchChart(ctx context.Context, s *store.Layout, j chartJob, tempRoot strin
 			// there is no separate per-discovered-image TLS knob in a chart
 			// manifest, so the registry a chart's images live in is assumed
 			// to share the chart repo's trust configuration.
+			imageRewrite := ""
+			if j.chartPrefix != "" {
+				imageRewrite = prefixArtifactRewrite(j.chartPrefix, relocated)
+			}
 			imageJobs = append(imageJobs, imageJob{
 				img: v1.Image{
 					Name:                  relocated,
@@ -1414,6 +1442,7 @@ func fetchChart(ctx context.Context, s *store.Layout, j chartJob, tempRoot strin
 				},
 				platform:      j.opts.Platform,
 				excludeExtras: j.opts.ExcludeExtras,
+				rewrite:       imageRewrite,
 			})
 		}
 	}
@@ -1454,11 +1483,17 @@ func fetchChart(ctx context.Context, s *store.Layout, j chartJob, tempRoot strin
 				depChartOpts.Version = dep.Version
 			}
 
+			depRewrite := ""
+			if j.chartPrefix != "" {
+				depRewrite = prefixChartRewrite(j.chartPrefix, depCfg.Name)
+			}
 			deps = append(deps, chartJob{
-				cfg:    depCfg,
-				opts:   depOpts,
-				parent: ref.Name(),
-				depth:  j.depth + 1,
+				cfg:         depCfg,
+				opts:        depOpts,
+				rewrite:     depRewrite,
+				chartPrefix: j.chartPrefix,
+				parent:      ref.Name(),
+				depth:       j.depth + 1,
 			})
 		}
 	}
