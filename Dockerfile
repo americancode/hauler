@@ -25,10 +25,10 @@ RUN addgroup -g 1001 -S hauler && \
     chown -R hauler:hauler /home/hauler /tmp /store /registry /fileserver
 
 COPY --from=builder --chown=hauler:hauler /home/hauler/. /home/hauler
-COPY --from=builder --chown=hauler:hauler /hauler /hauler
+COPY --from=builder --chown=hauler:hauler /hauler /usr/local/bin/hauler
 
 USER hauler
-ENTRYPOINT [ "/hauler" ]
+ENTRYPOINT [ "hauler" ]
 
 # debug stage
 FROM alpine:3.23 AS debug
