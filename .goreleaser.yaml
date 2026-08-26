@@ -58,7 +58,6 @@ dockers_v2:
     flags:
       - "--target=release"
     images:
-      - docker.io/hauler/hauler
       - ghcr.io/hauler-dev/hauler
     tags:
       - "{{ .Version }}"
@@ -79,7 +78,6 @@ dockers_v2:
     flags:
       - "--target=debug"
     images:
-      - docker.io/hauler/hauler-debug
       - ghcr.io/hauler-dev/hauler-debug
     tags:
       - "{{ .Version }}"
