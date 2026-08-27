@@ -229,7 +229,12 @@ jobs:
                       capture_output=True,
                   )
                   if result.returncode != 0:
-                      raise SystemExit(result.stderr or result.stdout)
+                      print(
+                          f"warning: cannot traverse {current}; "
+                          f"retaining this package without pruning: "
+                          f"{result.stderr or result.stdout}",
+                      )
+                      return False
                   manifest = json.loads(result.stdout)
 
                   subject = manifest.get("subject", {}).get("digest", "")
@@ -248,6 +253,7 @@ jobs:
                       if digest_hex not in seen:
                           seen.add(digest_hex)
                           pending.append(f"{registry}/{owner}/{package}@{value}")
+              return True
 
           for package in ("hauler", "hauler-debug"):
               base, items = versions(package)
@@ -273,8 +279,14 @@ jobs:
                       if match:
                           subjects.setdefault(item["id"], set()).add(match.group(1))
 
+              graph_complete = True
               for tag in keep_tags:
-                  add_referenced_digests(f"{registry}/{owner}/{package}:{tag}", keep_digests)
+                  if not add_referenced_digests(f"{registry}/{owner}/{package}:{tag}", keep_digests):
+                      graph_complete = False
+
+              if not graph_complete:
+                  print(f"{package}: skipped pruning because a retained tag has missing manifests")
+                  continue
 
               for item in items:
                   if digest(item) in keep_digests:
