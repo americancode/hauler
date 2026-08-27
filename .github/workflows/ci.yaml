@@ -212,14 +212,42 @@ jobs:
               return major, minor, patch, not bool(prerelease), prerelease, build
 
           def add_referenced_digests(ref, keep_digests):
-              result = subprocess.run(["oras", "manifest", "fetch", ref], text=True, capture_output=True)
-              if result.returncode != 0:
-                  raise SystemExit(result.stderr or result.stdout)
-              manifest = json.loads(result.stdout)
-              for descriptor in manifest.get("manifests", []) or []:
-                  value = descriptor.get("digest", "")
-                  if value.startswith("sha256:"):
-                      keep_digests.add(value.split(":", 1)[1])
+              """Keep the complete manifest graph reachable from a tag.
+
+              GHCR exposes the index, platform manifests, build attestations,
+              and signatures as separate package versions. Keeping only the
+              tagged index leaves a tag that resolves but cannot be pulled if
+              its child manifests are deleted.
+              """
+              pending = [ref]
+              seen = set()
+              while pending:
+                  current = pending.pop()
+                  result = subprocess.run(
+                      ["oras", "manifest", "fetch", current],
+                      text=True,
+                      capture_output=True,
+                  )
+                  if result.returncode != 0:
+                      raise SystemExit(result.stderr or result.stdout)
+                  manifest = json.loads(result.stdout)
+
+                  subject = manifest.get("subject", {}).get("digest", "")
+                  if subject.startswith("sha256:"):
+                      subject_hex = subject.split(":", 1)[1]
+                      if subject_hex not in keep_digests:
+                          keep_digests.add(subject_hex)
+
+                  for descriptor in manifest.get("manifests", []) or []:
+                      value = descriptor.get("digest", "")
+                      if not value.startswith("sha256:"):
+                          continue
+                      digest_hex = value.split(":", 1)[1]
+                      if digest_hex not in keep_digests:
+                          keep_digests.add(digest_hex)
+                      if digest_hex not in seen:
+                          seen.add(digest_hex)
+                          pending.append(f"{registry}/{owner}/{package}@{value}")
 
           for package in ("hauler", "hauler-debug"):
               base, items = versions(package)
@@ -249,6 +277,8 @@ jobs:
                   add_referenced_digests(f"{registry}/{owner}/{package}:{tag}", keep_digests)
 
               for item in items:
+                  if digest(item) in keep_digests:
+                      keep_ids.add(item["id"])
                   if subjects.get(item["id"], set()) & keep_digests:
                       keep_ids.add(item["id"])
 
