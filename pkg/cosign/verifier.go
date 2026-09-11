@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	goname "github.com/google/go-containerregistry/pkg/name"
-	"github.com/sigstore/cosign/v3/cmd/cosign/cli/options"
 	"github.com/sigstore/cosign/v3/cmd/cosign/cli/verify"
 	cosignpkg "github.com/sigstore/cosign/v3/pkg/cosign"
 
@@ -113,28 +112,23 @@ func NewVerifier(ctx context.Context, cfg Config, rso *flags.StoreRootOpts, ro *
 
 	var identities []cosignpkg.Identity
 	if cfg.Keyless() {
-		certOpts := options.CertVerifyOptions{
-			CertOidcIssuer:               cfg.CertOidcIssuer,
-			CertOidcIssuerRegexp:         cfg.CertOidcIssuerRegexp,
-			CertIdentity:                 cfg.CertIdentity,
-			CertIdentityRegexp:           cfg.CertIdentityRegexp,
-			CertGithubWorkflowRepository: cfg.CertGithubWorkflowRepository,
+		if cfg.CertIdentity == "" && cfg.CertIdentityRegexp == "" {
+			return nil, fmt.Errorf("building identities: %w", errors.New("--certificate-identity or --certificate-identity-regexp is required for verification in keyless mode"))
 		}
-		var err error
-		if identities, err = certOpts.Identities(); err != nil {
-			return nil, fmt.Errorf("building identities: %w", err)
+		if cfg.CertOidcIssuer == "" && cfg.CertOidcIssuerRegexp == "" {
+			return nil, fmt.Errorf("building identities: %w", errors.New("--certificate-oidc-issuer or --certificate-oidc-issuer-regexp is required for verification in keyless mode"))
 		}
+		identities = []cosignpkg.Identity{{
+			Issuer:        cfg.CertOidcIssuer,
+			IssuerRegExp:  cfg.CertOidcIssuerRegexp,
+			Subject:       cfg.CertIdentity,
+			SubjectRegExp: cfg.CertIdentityRegexp,
+		}}
 	}
 
 	// insecureSkipTLSVerify takes precedence: when set, caFile is ignored --
 	// mirrors content.BuildTransport's precedence for the plain registry pull.
-	regOpts := options.RegistryOptions{}
-	if cfg.InsecureSkipTLSVerify {
-		regOpts.AllowInsecure = true
-	} else {
-		regOpts.RegistryCACert = cfg.CaFile
-	}
-	ociremoteOpts, err := regOpts.ClientOpts(ctx)
+	ociremoteOpts, err := registryClientOpts(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("constructing registry client options: %w", err)
 	}
