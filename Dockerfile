@@ -14,6 +14,7 @@ ARG PROJECT=hauler.dev/go/hauler/v2
 WORKDIR /workspace
 
 COPY go.mod go.sum ./
+COPY internal/third_party ./internal/third_party
 RUN go mod download
 COPY . .
 
