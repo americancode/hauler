@@ -324,15 +324,11 @@ func (l *Layout) AddImage(ctx context.Context, ref string, platform string, excl
 	}
 
 	if !excludeExtras {
-		// Related artifacts are attached to the descriptor fetched from the
-		// registry. When a platform is selected, imageDigest is the child
-		// manifest stored in the layout, while desc.Digest is the multi-platform
-		// index that signatures and OCI 1.1 referrers sign/reference.
-		savedDigests, err := l.saveRelatedArtifacts(ctx, parsedRef, desc.Digest, allOpts...)
+		savedDigests, err := l.saveRelatedArtifacts(ctx, parsedRef, imageDigest, allOpts...)
 		if err != nil {
 			return "", err
 		}
-		return imageDigest.String(), l.saveReferrers(ctx, parsedRef, desc.Digest, savedDigests, allOpts...)
+		return imageDigest.String(), l.saveReferrers(ctx, parsedRef, imageDigest, savedDigests, allOpts...)
 	}
 	return imageDigest.String(), nil
 }
