@@ -1,5 +1,10 @@
 module hauler.dev/go/hauler/v2
 
+// Cosign's CLI verification package unconditionally imports this helper, even
+// though Hauler never enables Cosign's ACR credential-helper path. Keep the
+// helper inert until Cosign removes the vulnerable dependency upstream.
+replace github.com/chrismellard/docker-credential-acr-env => ./internal/third_party/docker-credential-acr-env
+
 go 1.27.2
 
 require (
