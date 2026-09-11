@@ -12,21 +12,28 @@ TRIVY_RESULTS=trivy.out
 # set build variables
 BIN_DIRECTORY=bin
 DIST_DIRECTORY=dist
+PROJECT=hauler.dev/go/hauler/v2
+VERSION?=devel
+COMMIT?=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_TIME?=$(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
+GOOS?=$(shell go env GOOS)
+GOARCH?=$(shell go env GOARCH)
+LDFLAGS=-s -w -X $(PROJECT)/internal/version.gitVersion=$(VERSION) -X $(PROJECT)/internal/version.gitCommit=$(COMMIT) -X $(PROJECT)/internal/version.gitTreeState=clean -X $(PROJECT)/internal/version.buildDate=$(BUILD_TIME)
 
-# local build of hauler for current platform
-# references/configuration from .goreleaser.yaml
+# local build of hauler for the current platform
 build:
-	goreleaser build --clean --snapshot --timeout 60m --single-target
+	mkdir -p $(BIN_DIRECTORY)
+	CGO_ENABLED=0 GOEXPERIMENT=boringcrypto GOOS=$(GOOS) GOARCH=$(GOARCH) go build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIRECTORY)/hauler ./cmd/hauler/.
 
-# local build of hauler for all platforms
-# references/configuration from .goreleaser.yaml
+# local build of hauler for Linux amd64 and arm64
 build-all:
-	goreleaser build --clean --snapshot --timeout 60m
+	mkdir -p $(DIST_DIRECTORY)
+	for arch in amd64 arm64; do \
+		CGO_ENABLED=0 GOEXPERIMENT=boringcrypto GOOS=linux GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" -o $(DIST_DIRECTORY)/hauler-linux-$$arch ./cmd/hauler/.; \
+	done
 
-# local release of hauler for all platforms
-# references/configuration from .goreleaser.yaml
-release:
-	goreleaser release --clean --snapshot --timeout 60m
+# Build release artifacts locally. Publishing is handled by CI.
+release: build-all
 
 # install depedencies
 install:

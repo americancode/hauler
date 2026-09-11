@@ -1,9 +1,29 @@
 # builder stage
-FROM registry.suse.com/bci/bci-base:16.1 AS builder
-ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+FROM --platform=${BUILDPLATFORM} docker.io/library/golang:1.26.6 AS builder
 
-# fetched from goreleaser build process
-COPY $TARGETPLATFORM/hauler /hauler
+ARG VERSION=devel
+ARG COMMIT
+ARG BUILD_TIME
+ARG TARGETOS=linux
+ARG TARGETARCH
+ARG PROJECT=hauler.dev/go/hauler/v2
+
+WORKDIR /workspace
+
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOEXPERIMENT=boringcrypto go build \
+    -trimpath -ldflags "-s -w \
+    -X ${PROJECT}/internal/version.gitVersion=${VERSION} \
+    -X ${PROJECT}/internal/version.gitCommit=${COMMIT} \
+    -X ${PROJECT}/internal/version.gitTreeState=clean \
+    -X ${PROJECT}/internal/version.buildDate=${BUILD_TIME}" \
+    -o /hauler ./cmd/hauler/.
 
 RUN echo "hauler:x:1001:1001::/home/hauler:" > /etc/passwd \
 && echo "hauler:x:1001:hauler" > /etc/group \
