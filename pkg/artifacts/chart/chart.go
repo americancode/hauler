@@ -14,12 +14,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	goname "github.com/google/go-containerregistry/pkg/name"
 	gv1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/partial"
-	gtypes "github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"hauler.dev/go/hauler/v2/pkg/artifacts"
 	"helm.sh/helm/v4/pkg/action"
@@ -68,6 +70,20 @@ func resolveRepoCredentials(repoURL string) (string, string, error) {
 // chart implements the oci interface for chart api objects... api spec values are stored into the name, repo, and version fields
 type Chart struct {
 	path        string
+	annotations map[string]string
+	// preservedManifest is populated when the source is an OCI registry. In
+	// that case the chart must be relocated as an OCI artifact, not rebuilt
+	// from the downloaded archive: Helm's manifest annotations are part of the
+	// manifest digest.
+	preservedManifest     *gv1.Manifest
+	preservedManifestData []byte
+	preservedConfig       []byte
+	preservedLayers       []preservedLayer
+}
+
+type preservedLayer struct {
+	data        []byte
+	mediaType   string
 	annotations map[string]string
 }
 
@@ -124,9 +140,52 @@ func NewChart(name string, opts *action.ChartPathOptions) (*Chart, error) {
 		return nil, err
 	}
 
-	return &Chart{
+	h := &Chart{
 		path: chartPath,
-	}, err
+	}
+
+	// LocateChart gives us the chart archive, which is sufficient for normal
+	// chart sources but not for digest-preserving OCI relocation. Pull the OCI
+	// manifest and its blobs as well so Manifest/Layers can reproduce the
+	// original descriptor graph byte-for-byte.
+	if registry.IsOCI(opts.RepoURL) {
+		pulled, err := registryClient.Pull(chartRef,
+			registry.PullOptWithChart(true),
+			registry.PullOptWithProv(true),
+			registry.PullOptIgnoreMissingProv(true),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("preserving OCI chart manifest: %w", err)
+		}
+
+		var manifest gv1.Manifest
+		if err := json.Unmarshal(pulled.Manifest.Data, &manifest); err != nil {
+			return nil, fmt.Errorf("decoding OCI chart manifest: %w", err)
+		}
+		h.preservedManifest = &manifest
+		h.preservedManifestData = append([]byte(nil), pulled.Manifest.Data...)
+		h.preservedConfig = append([]byte(nil), pulled.Config.Data...)
+
+		for _, descriptor := range manifest.Layers {
+			var data []byte
+			switch descriptor.Digest.String() {
+			case pulled.Chart.Digest:
+				data = pulled.Chart.Data
+			case pulled.Prov.Digest:
+				data = pulled.Prov.Data
+			}
+			if data == nil {
+				return nil, fmt.Errorf("OCI chart layer %s was not returned by Helm", descriptor.Digest)
+			}
+			h.preservedLayers = append(h.preservedLayers, preservedLayer{
+				data:        append([]byte(nil), data...),
+				mediaType:   string(descriptor.MediaType),
+				annotations: descriptor.Annotations,
+			})
+		}
+	}
+
+	return h, nil
 }
 
 func (h *Chart) MediaType() string {
@@ -134,6 +193,15 @@ func (h *Chart) MediaType() string {
 }
 
 func (h *Chart) Manifest() (*gv1.Manifest, error) {
+	if h.preservedManifest != nil {
+		manifest := *h.preservedManifest
+		manifest.Config.Data = nil
+		for i := range manifest.Layers {
+			manifest.Layers[i].Data = nil
+		}
+		return &manifest, nil
+	}
+
 	cfgDesc, err := h.configDescriptor()
 	if err != nil {
 		return nil, err
@@ -141,24 +209,135 @@ func (h *Chart) Manifest() (*gv1.Manifest, error) {
 
 	var layerDescs []gv1.Descriptor
 	ls, err := h.Layers()
+	if err != nil {
+		return nil, err
+	}
 	for _, l := range ls {
 		desc, err := partial.Descriptor(l)
 		if err != nil {
 			return nil, err
 		}
+		// Helm's OCI pusher does not add the local archive filename to the
+		// chart layer descriptor. Keep that annotation on the Hauler layer
+		// object for extraction, but omit it from the pushed manifest so the
+		// manifest matches Helm's.
+		desc.Annotations = nil
 		layerDescs = append(layerDescs, *desc)
+	}
+
+	ch, err := loader.Load(h.path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(h.path)
+	if err != nil {
+		return nil, err
 	}
 
 	return &gv1.Manifest{
 		SchemaVersion: 2,
-		MediaType:     gtypes.MediaType(h.MediaType()),
-		Config:        cfgDesc,
-		Layers:        layerDescs,
-		Annotations:   h.annotations,
+		// Helm's registry client tags the manifest with this media type in
+		// ORAS, but omits the field from the serialized manifest JSON.
+		MediaType:   "",
+		Config:      cfgDesc,
+		Layers:      layerDescs,
+		Annotations: helmOCIAnnotations(ch.Metadata, info.ModTime().Format(time.RFC3339)),
 	}, nil
 }
 
+// RawManifest returns the exact source manifest for OCI charts. For archive
+// charts it emits the Helm-compatible descriptor field order; OCI manifest
+// JSON field order is part of the content digest.
+func (h *Chart) RawManifest() ([]byte, error) {
+	if h.preservedManifestData != nil {
+		return append([]byte(nil), h.preservedManifestData...), nil
+	}
+
+	manifest, err := h.Manifest()
+	if err != nil {
+		return nil, err
+	}
+	type helmManifest struct {
+		SchemaVersion int64                `json:"schemaVersion"`
+		Config        ocispec.Descriptor   `json:"config"`
+		Layers        []ocispec.Descriptor `json:"layers"`
+		Annotations   map[string]string    `json:"annotations,omitempty"`
+	}
+	config := ocispec.Descriptor{
+		MediaType: string(manifest.Config.MediaType),
+		Digest:    digest.Digest(manifest.Config.Digest.String()),
+		Size:      manifest.Config.Size,
+	}
+	layers := make([]ocispec.Descriptor, 0, len(manifest.Layers))
+	for _, descriptor := range manifest.Layers {
+		layers = append(layers, ocispec.Descriptor{
+			MediaType:   string(descriptor.MediaType),
+			Digest:      digest.Digest(descriptor.Digest.String()),
+			Size:        descriptor.Size,
+			Annotations: descriptor.Annotations,
+		})
+	}
+	return json.Marshal(helmManifest{
+		SchemaVersion: manifest.SchemaVersion,
+		Config:        config,
+		Layers:        layers,
+		Annotations:   manifest.Annotations,
+	})
+}
+
+// helmOCIAnnotations mirrors Helm's registry.generateOCIAnnotations. These
+// annotations are part of the manifest digest, so chart archives must use the
+// same rules as Helm when Hauler creates an OCI manifest.
+func helmOCIAnnotations(meta *v2.Metadata, creationTime string) map[string]string {
+	annotations := make(map[string]string)
+	add := func(key, value string) {
+		if strings.TrimSpace(value) != "" {
+			annotations[key] = value
+		}
+	}
+
+	add(ocispec.AnnotationDescription, meta.Description)
+	add(ocispec.AnnotationTitle, meta.Name)
+	add(ocispec.AnnotationVersion, meta.Version)
+	add(ocispec.AnnotationURL, meta.Home)
+	add(ocispec.AnnotationCreated, creationTime)
+	if len(meta.Sources) > 0 {
+		add(ocispec.AnnotationSource, meta.Sources[0])
+	}
+	if len(meta.Maintainers) > 0 {
+		var maintainers strings.Builder
+		for i, maintainer := range meta.Maintainers {
+			if maintainer.Name != "" {
+				maintainers.WriteString(maintainer.Name)
+			}
+			if maintainer.Email != "" {
+				maintainers.WriteString(" (")
+				maintainers.WriteString(maintainer.Email)
+				maintainers.WriteString(")")
+			}
+			if i < len(meta.Maintainers)-1 {
+				maintainers.WriteString(", ")
+			}
+		}
+		add(ocispec.AnnotationAuthors, maintainers.String())
+	}
+
+	// Helm copies Chart.yaml annotations, except for the immutable OCI
+	// identity fields which Helm generated above.
+	for key, value := range meta.Annotations {
+		if key == ocispec.AnnotationVersion || key == ocispec.AnnotationTitle {
+			continue
+		}
+		annotations[key] = value
+	}
+	return annotations
+}
+
 func (h *Chart) RawConfig() ([]byte, error) {
+	if h.preservedConfig != nil {
+		return append([]byte(nil), h.preservedConfig...), nil
+	}
+
 	ch, err := loader.Load(h.path)
 	if err != nil {
 		return nil, err
@@ -189,6 +368,21 @@ func (h *Chart) Load() (*v2.Chart, error) {
 }
 
 func (h *Chart) Layers() ([]gv1.Layer, error) {
+	if h.preservedManifest != nil {
+		layers := make([]gv1.Layer, 0, len(h.preservedLayers))
+		for _, preserved := range h.preservedLayers {
+			data := append([]byte(nil), preserved.data...)
+			lyr, err := layer.FromOpener(func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(data)), nil
+			}, layer.WithMediaType(preserved.mediaType), layer.WithAnnotations(preserved.annotations))
+			if err != nil {
+				return nil, err
+			}
+			layers = append(layers, lyr)
+		}
+		return layers, nil
+	}
+
 	chartDataLayer, err := h.chartData()
 	if err != nil {
 		return nil, err

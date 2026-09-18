@@ -148,6 +148,14 @@ func loadOrCreateStoreID(rootdir string) string {
 //	strict types to define generic content, but provides a processing pipeline suitable for extensibility.  In the
 //	future we'll allow users to define their own content that must adhere either by artifact.OCI or simply an OCI layout.
 func (l *Layout) AddArtifact(ctx context.Context, oci artifacts.OCI, ref string) (ocispec.Descriptor, error) {
+	// Some artifacts, notably Helm charts, can provide the exact serialized
+	// source manifest. Preserve it when available; re-marshalling through
+	// go-containerregistry changes descriptor field order and therefore the
+	// root digest even when every referenced blob is identical.
+	rawManifestOCI, hasRawManifest := oci.(interface {
+		RawManifest() ([]byte, error)
+	})
+
 	if l.cache != nil {
 		cached := layer.OCICache(oci, l.cache)
 		oci = cached
@@ -159,7 +167,12 @@ func (l *Layout) AddArtifact(ctx context.Context, oci artifacts.OCI, ref string)
 		return ocispec.Descriptor{}, err
 	}
 
-	mdata, err := json.Marshal(m)
+	var mdata []byte
+	if hasRawManifest {
+		mdata, err = rawManifestOCI.RawManifest()
+	} else {
+		mdata, err = json.Marshal(m)
+	}
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
@@ -210,6 +223,9 @@ func (l *Layout) AddArtifact(ctx context.Context, oci artifacts.OCI, ref string)
 		},
 		URLs:     nil,
 		Platform: nil,
+	}
+	if idx.MediaType == "" {
+		idx.MediaType = oci.MediaType()
 	}
 
 	return idx, l.OCI.AddIndex(idx)

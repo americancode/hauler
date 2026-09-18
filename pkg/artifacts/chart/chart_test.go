@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	v1 "github.com/google/go-containerregistry/pkg/v1"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"helm.sh/helm/v4/pkg/action"
 
 	"hauler.dev/go/hauler/v2/pkg/artifacts/chart"
@@ -44,9 +43,7 @@ func TestNewChart(t *testing.T) {
 					Algorithm: "sha256",
 					Hex:       "0905de044a6e57cf3cd27bfc8482753049920050b10347ae2315599bd982a0e3",
 				},
-				Annotations: map[string]string{
-					ocispec.AnnotationTitle: "rancher-cluster-templates-0.5.2.tgz",
-				},
+				Annotations: nil,
 			},
 			wantErr: false,
 		},
@@ -68,9 +65,7 @@ func TestNewChart(t *testing.T) {
 					Algorithm: "sha256",
 					Hex:       "0905de044a6e57cf3cd27bfc8482753049920050b10347ae2315599bd982a0e3",
 				},
-				Annotations: map[string]string{
-					ocispec.AnnotationTitle: "mismatched-filename-chart.tgz",
-				},
+				Annotations: nil,
 			},
 			wantErr: false,
 		},
@@ -97,9 +92,7 @@ func TestNewChart(t *testing.T) {
 					Algorithm: "sha256",
 					Hex:       "016e68d9f7083d2c4fd302f951ee6490dbf4cb1ef44cfc06914c39cbfb01d858",
 				},
-				Annotations: map[string]string{
-					ocispec.AnnotationTitle: "cert-manager-v1.15.3.tgz",
-				},
+				Annotations: nil,
 			},
 			wantErr: false,
 		},
