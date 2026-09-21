@@ -149,7 +149,11 @@ func NewChart(name string, opts *action.ChartPathOptions) (*Chart, error) {
 	// manifest and its blobs as well so Manifest/Layers can reproduce the
 	// original descriptor graph byte-for-byte.
 	if registry.IsOCI(opts.RepoURL) {
-		pulled, err := registryClient.Pull(chartRef,
+		preserveRef, err := resolvedOCIReference(chartRef, chartPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolving OCI chart reference for manifest preservation: %w", err)
+		}
+		pulled, err := registryClient.Pull(preserveRef,
 			registry.PullOptWithChart(true),
 			registry.PullOptWithProv(true),
 			registry.PullOptIgnoreMissingProv(true),
@@ -186,6 +190,31 @@ func NewChart(name string, opts *action.ChartPathOptions) (*Chart, error) {
 	}
 
 	return h, nil
+}
+
+// resolvedOCIReference returns a pullable OCI reference for a chart that Helm
+// has already resolved and downloaded. ChartPathOptions.LocateChart accepts a
+// repository reference plus Version, but registry.Client.Pull requires the
+// concrete tag or digest in the reference itself.
+func resolvedOCIReference(ref, chartPath string) (string, error) {
+	withoutScheme := strings.TrimPrefix(ref, "oci://")
+	lastSlash := strings.LastIndexByte(withoutScheme, '/')
+	lastColon := strings.LastIndexByte(withoutScheme, ':')
+	if lastColon > lastSlash || strings.Contains(withoutScheme, "@") {
+		return ref, nil
+	}
+
+	ch, err := loader.Load(chartPath)
+	if err != nil {
+		return "", err
+	}
+	if ch.Metadata == nil || ch.Metadata.Version == "" {
+		return "", fmt.Errorf("downloaded chart has no version")
+	}
+
+	// Helm rewrites '+' to '_' in OCI tags because '+' is not a valid OCI tag
+	// character.
+	return ref + ":" + strings.ReplaceAll(ch.Metadata.Version, "+", "_"), nil
 }
 
 func (h *Chart) MediaType() string {
