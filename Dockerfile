@@ -2,7 +2,7 @@
 ARG BUILDPLATFORM
 ARG TARGETOS
 ARG TARGETARCH
-FROM --platform=${BUILDPLATFORM} docker.io/library/golang:1.26.6 AS builder
+FROM --platform=${BUILDPLATFORM} docker.io/library/golang:1.27.2 AS builder
 
 ARG VERSION=devel
 ARG COMMIT
