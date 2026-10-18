@@ -195,7 +195,7 @@ func TestCopyCmd_Registry_CaFile(t *testing.T) {
 	o.Insecure = true
 	if err := CopyCmd(ctx, o, s, "registry://"+dstHost, ro); err != nil {
 		t.Fatalf("CopyCmd read the ca file even though insecure was set: %v", err)
- 	}
+	}
 }
 
 // TestCopyCmd_Registry_PrefersParentIndexOverSameTagChild reproduces the
