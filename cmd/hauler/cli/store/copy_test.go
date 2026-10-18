@@ -195,6 +195,61 @@ func TestCopyCmd_Registry_CaFile(t *testing.T) {
 	o.Insecure = true
 	if err := CopyCmd(ctx, o, s, "registry://"+dstHost, ro); err != nil {
 		t.Fatalf("CopyCmd read the ca file even though insecure was set: %v", err)
+ 	}
+}
+
+// TestCopyCmd_Registry_PrefersParentIndexOverSameTagChild reproduces the
+// multi-arch tag regression: a full index is copied first, then a platform
+// filtered pull stores a child under the same tag. Both top-level descriptors
+// must not be published under that tag, or the registry's last manifest PUT
+// replaces the parent index tag with the architecture-specific child.
+func TestCopyCmd_Registry_PrefersParentIndexOverSameTagChild(t *testing.T) {
+	ctx := newTestContext(t)
+
+	srcHost, srcOpts := newTestRegistry(t)
+	seedIndex(t, srcHost, "test/multiarch", "v1", srcOpts...)
+
+	s := newTestStore(t)
+	ref := srcHost + "/test/multiarch:v1"
+	if _, err := s.AddImage(ctx, ref, "", true, "", false, "", srcOpts...); err != nil {
+		t.Fatalf("AddImage full index: %v", err)
+	}
+	if _, err := s.AddImage(ctx, ref, "linux/arm64", true, "", false, "", srcOpts...); err != nil {
+		t.Fatalf("AddImage filtered child: %v", err)
+	}
+
+	var sameRef int
+	if err := s.Walk(func(_ string, desc ocispec.Descriptor) error {
+		if desc.Annotations[ocispec.AnnotationRefName] == "test/multiarch:v1" {
+			sameRef++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Walk store: %v", err)
+	}
+	if sameRef != 2 {
+		t.Fatalf("expected parent index and filtered child to share the stored tag, got %d descriptors", sameRef)
+	}
+
+	dstHost, dstOpts := newTestRegistry(t)
+	o := &flags.CopyOpts{
+		StoreRootOpts: defaultRootOpts(s.Root),
+		PlainHTTP:     true,
+	}
+	if err := CopyCmd(ctx, o, s, "registry://"+dstHost, defaultCliOpts()); err != nil {
+		t.Fatalf("CopyCmd registry: %v", err)
+	}
+
+	dstRef, err := goname.NewTag(dstHost+"/test/multiarch:v1", goname.Insecure)
+	if err != nil {
+		t.Fatalf("goname.NewTag: %v", err)
+	}
+	desc, err := remote.Get(dstRef, dstOpts...)
+	if err != nil {
+		t.Fatalf("fetch copied tag: %v", err)
+	}
+	if _, err := desc.ImageIndex(); err != nil {
+		t.Fatalf("copied tag resolved to a child manifest instead of the parent index: %v", err)
 	}
 }
 

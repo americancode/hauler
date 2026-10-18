@@ -217,11 +217,15 @@ func CopyCmd(ctx context.Context, o *flags.CopyOpts, s *store.Layout, targetRef 
 		// descriptors (which store the base image ref, not the cosign tag) can be routed
 		// to the correct destination tag using the cosign tag convention.
 		refDigest := make(map[string]string)
+		indexRefs := make(map[string]bool)
 		if err := s.Walk(func(_ string, desc ocispec.Descriptor) error {
 			kind := desc.Annotations[consts.KindAnnotationName]
 			if kind == consts.KindAnnotationImage || kind == consts.KindAnnotationIndex {
 				if baseRef := desc.Annotations[ocispec.AnnotationRefName]; baseRef != "" {
 					refDigest[baseRef] = desc.Digest.String()
+					if kind == consts.KindAnnotationIndex {
+						indexRefs[baseRef] = true
+					}
 				}
 			}
 			return nil
@@ -261,6 +265,14 @@ func CopyCmd(ctx context.Context, o *flags.CopyOpts, s *store.Layout, targetRef 
 			// image's manifest digest rather than using AnnotationRefName directly.
 			destRef := baseRef
 			kind := desc.Annotations[consts.KindAnnotationName]
+			// A platform-filtered pull can leave both a parent index and a child
+			// image under the same reference in the store. Never publish the child
+			// as that tag: the registry would let the last manifest upload replace
+			// the parent tag, leaving CRI clients to resolve the wrong architecture.
+			if kind == consts.KindAnnotationImage && indexRefs[baseRef] {
+				l.Debugf("skipping child image [%s] because parent index owns reference [%s]", desc.Digest, baseRef)
+				return nil
+			}
 			if ext, isSigKind := consts.SigKindExt(kind); isSigKind {
 				// Prefer the subject recorded at add time -- a per-platform sig must
 				// land on its own subject's tag, not the top-level index's. Old

@@ -13,6 +13,7 @@ bin/
 /store/
 registry/
 fileserver/
+hauler-original/
 cmd/hauler/binaries
 testdata/certs/
 coverage.out
